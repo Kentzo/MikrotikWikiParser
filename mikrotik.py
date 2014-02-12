@@ -79,7 +79,7 @@ def parse_page(page_url):
                 for command in current_commands:
                     result.append({
                         'name': prop,
-                        'command': {
+                        command: {
                             'type': ['readwrite', 'readonly'][read_only],
                             'values': values,
                             'default': default,
