@@ -2,68 +2,115 @@ from urllib.request import urlopen
 import re
 import json
 import sys
+from collections import OrderedDict
 
 from bs4 import BeautifulSoup
 
 
-def with_submenu(tag):
+def with_command(tag):
+    tokens = ["submenu", "sub-menu", "command"]
     txt = tag.get_text().lower()
-    return tag.name == "b" and ("submenu" in txt or "sub-menu" in txt)
+    return any(token in txt for token in tokens)
+
+
+def with_readonly(tag):
+    tokens = ["readonly", "read-only", "read only"]
+    txt = tag.get_text().lower()
+    return any(token in txt for token in tokens)
 
 
 def parse_page(page_url):
     response = urlopen(page_url)
-    soup = BeautifulSoup(response.read())
+    soup = BeautifulSoup(response.read(), "html5lib")
     container = soup.find(class_="manual")
     if not container:
         container = soup.find(id="bodyContent")
-        if not container:
-            raise Exception
-    current_submenu = None
+    else:
+        # TODO
+        pass
     result = []
+    current_commands = None
+    read_only = False
+    def_regexp = re.compile(r"""
+        ^(?P<prop>[^\s]+)
+        \s\(
+        (?P<values>[^;]*)
+        (;\s(D|d)efault:\s?(?P<default>.*)|;|)
+        \)$
+        """, re.X)
     for elem in container.children:
-        if isinstance(elem, str):
+        # Skip regular strings and tocs
+        if isinstance(elem, str) or elem.get('id') == "toc":
             continue
-        # Check for "submenu" declaration
-        sm_tags = elem.find_all(with_submenu)
-        if sm_tags:
-            if len(sm_tags) > 1:
-                raise Exception
-            code = sm_tags[0].next_sibling.next_sibling
-            current_submenu = code.string.strip()
-        # Check for tables 
+        # Look for tables
         if elem.get("class") and "styled_table" in elem['class']:
+            # Analyze table headers
+            headers = elem.find_all("th")
+            if not headers:
+                print("Found table without headers, skipping")
+                continue
+            else:
+                col1_title = headers[0].get_text().strip().lower()
+                if col1_title != "property":
+                    print("Found table with header: {}, skipping".format(col1_title))
+                    continue
+                print("Found property table")
+            if current_commands is None:
+                print("Current commands is undefined, skipping")
+                continue
+            # Analyze rows
             for row in elem.find_all("tr"):
-                headers = row.find_all("th")
-                if headers:
-                    col1_title = headers[0].get_text().strip().lower()
-                    if col1_title != "property":
-                        print("Skipping table: {}".format(col1_title))
-                        break
                 cells = row.find_all("td")
                 if not cells:
                     continue
                 definition = cells[0].get_text()
-                m = re.match(r"^(?P<prop>[^\s]+)\s\((?P<values>[^;]*)(;\s(D|d)efault:\s?(?P<def>.*)|;|)\)$", definition)
+                m = def_regexp.match(definition)
                 if not m:
                     print("Unable to parse definition: {}".format(definition))
                     continue
                 prop = m.group("prop").strip()
-                values_raw = m.group("values").split("|")
-                if len(values_raw) > 1:
-                    values = [v.strip() for v in values_raw]
+                if read_only:
+                    # ???
+                    values, default = None, None
                 else:
-                    values = values_raw[0].strip()
-                default = m.group("def") if m.group("def") else None
+                    values_raw = m.group("values").split("|")
+                    if len(values_raw) > 1:
+                        values = [v.strip() for v in values_raw]
+                    else:
+                        values = values_raw[0].strip() or None
+                    default = m.group("default") or None
+                    # ???
+                    #if not isinstance(values, list) and default is not None:
+                    #    print("Default is not None: {}".format(definition))
                 description = cells[1].get_text().strip()
-                result.append({
-                    'name': prop,
-                    current_submenu: {
-                        'values': values,
-                        'default': default,
-                        'description': description,
-                    },
-                })
+                for command in current_commands:
+                    result.append({
+                        'name': prop,
+                        'command': command,
+                        'info': {
+                            'values': values,
+                            'default': default,
+                            'description': description,
+                        },
+                    })
+            # Reset read-only flag
+            read_only = False
+            # Skip other checks
+            continue
+        # Look for "submenu" declaration
+        if with_command(elem) or elem.find(with_command):
+            codes = [code.string for code in elem.find_all("code")
+                if code.string and code.string.startswith("/")]
+            if not codes:
+                continue
+            elif len(codes) > 1:
+                print("Miltiple code tags")
+            current_commands = [comm.strip() for comm in codes[0].split(",")]
+            print("Found commands: {0}".format(current_commands))
+        # Look for "read-only" mark
+        if with_readonly(elem) or elem.find(with_readonly):
+            read_only = True
+            print("Found 'read-only' mark")
     return result
 
 
@@ -71,7 +118,7 @@ def get_pages(root, toc_url):
     response = urlopen(root + toc_url)
     soup = BeautifulSoup(response.read())
     tables = soup.find_all(id="shtable")
-    toc = {}
+    toc = OrderedDict()
     for table in tables:
         rows = table.find_all("tr")
         cells = zip(rows[0].find_all("td"), rows[1].find_all("td"))
