@@ -3,6 +3,7 @@ import re
 import json
 import sys
 from collections import OrderedDict
+import logging
 
 from bs4 import BeautifulSoup
 
@@ -25,9 +26,6 @@ def parse_page(page_url):
     container = soup.find(class_="manual")
     if not container:
         container = soup.find(id="bodyContent")
-    else:
-        # TODO
-        pass
     result = []
     current_commands = None
     read_only = False
@@ -37,7 +35,7 @@ def parse_page(page_url):
         (?P<values>[^;]*)
         (;\s(D|d)efault:\s?(?P<default>.*)|;|)
         \)$
-        """, re.X)
+        """, re.VERBOSE)
     for elem in container.children:
         # Skip regular strings and tocs
         if isinstance(elem, str) or elem.get('id') == "toc":
@@ -47,16 +45,16 @@ def parse_page(page_url):
             # Analyze table headers
             headers = elem.find_all("th")
             if not headers:
-                print("Found table without headers, skipping")
+                log.info("Found table without headers, skipping")
                 continue
             else:
                 col1_title = headers[0].get_text().strip().lower()
                 if col1_title != "property":
-                    print("Found table with header: {}, skipping".format(col1_title))
+                    log.info("Found table with header: {}, skipping".format(col1_title))
                     continue
-                print("Found property table")
+                log.debug("Found property table")
             if current_commands is None:
-                print("Current commands is undefined, skipping")
+                log.warning("Current commands is undefined, skipping")
                 continue
             # Analyze rows
             for row in elem.find_all("tr"):
@@ -66,28 +64,23 @@ def parse_page(page_url):
                 definition = cells[0].get_text()
                 m = def_regexp.match(definition)
                 if not m:
-                    print("Unable to parse definition: {}".format(definition))
+                    log.info("Unable to parse definition: {}".format(definition))
                     continue
                 prop = m.group("prop").strip()
-                if read_only:
-                    # ???
-                    values, default = None, None
+                values_raw = m.group("values").split("|")
+                if len(values_raw) > 1:
+                    values = [v.strip() for v in values_raw]
                 else:
-                    values_raw = m.group("values").split("|")
-                    if len(values_raw) > 1:
-                        values = [v.strip() for v in values_raw]
-                    else:
-                        values = values_raw[0].strip() or None
-                    default = m.group("default") or None
-                    # ???
-                    #if not isinstance(values, list) and default is not None:
-                    #    print("Default is not None: {}".format(definition))
+                    values = values_raw[0].strip() or None
+                default = m.group("default") or None
+                if read_only and default is not None:
+                    log.info("Default value for read-only property: {0}".format(prop))
                 description = cells[1].get_text().strip()
                 for command in current_commands:
                     result.append({
                         'name': prop,
-                        'command': command,
-                        'info': {
+                        'command': {
+                            'type': ['readwrite', 'readonly'][read_only],
                             'values': values,
                             'default': default,
                             'description': description,
@@ -100,17 +93,17 @@ def parse_page(page_url):
         # Look for "submenu" declaration
         if with_command(elem) or elem.find(with_command):
             codes = [code.string for code in elem.find_all("code")
-                if code.string and code.string.startswith("/")]
+                if code.string and code.string.strip().startswith("/")]
             if not codes:
                 continue
             elif len(codes) > 1:
-                print("Miltiple code tags")
+                log.debug("Miltiple code tags")
             current_commands = [comm.strip() for comm in codes[0].split(",")]
-            print("Found commands: {0}".format(current_commands))
+            log.debug("Found commands: {0}".format(current_commands))
         # Look for "read-only" mark
         if with_readonly(elem) or elem.find(with_readonly):
             read_only = True
-            print("Found 'read-only' mark")
+            log.debug("Found 'read-only' mark")
     return result
 
 
@@ -139,16 +132,23 @@ def parse_wiki():
     toc = get_pages("http://wiki.mikrotik.com", "/wiki/Manual:TOC_by_Menu")
     results = {}
     for menu, pages in toc.items():
-        print("Processing: {}".format(menu))
+        log.info("Processing: {}".format(menu))
         for page in pages:
-            print("Processing: {}".format(page))
+            log.info("Processing: {}".format(page))
             for propdef in parse_page(page):
-                prop = propdef.pop('name')
-                if prop not in results:
-                    results[prop] = {}
-                results[prop].update(propdef)
-    output = [{'name': prop, 'references': refs} for prop, refs in results.items()]
-    return output
+                name = propdef.pop('name')
+                if name not in results:
+                    results[name] = {'name': name, 'references': {}}
+                results[name]['references'].update(propdef)
+    return list(results.values())
+
+
+logging.basicConfig(
+    format="{asctime} [{levelname}] :: {message}",
+    style='{',
+    level=logging.INFO,
+    handlers=[logging.StreamHandler()])
+log = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
