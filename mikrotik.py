@@ -29,13 +29,19 @@ def parse_page(page_url):
     result = []
     current_commands = None
     read_only = False
-    def_regexp = re.compile(r"""
+    def_regexp_strict = re.compile(r"""
         ^(?P<prop>[^\s]+)
         \s\(
         (?P<values>[^;]*)
         (;\s(D|d)efault:\s?(?P<default>.*)|;|)
         \)$
         """, re.VERBOSE)
+    def_regexp_nonstrict = re.compile(r"""
+        ^(?P<prop>.+)
+        \s\(
+        (?P<values>.*)
+        \)$
+        """, re.VERBOSE | re.DOTALL)
     for elem in container.children:
         # Skip regular strings and tocs
         if isinstance(elem, str) or elem.get('id') == "toc":
@@ -62,19 +68,25 @@ def parse_page(page_url):
                 if not cells:
                     continue
                 definition = cells[0].get_text()
-                m = def_regexp.match(definition)
-                if not m:
+                mt_strict = def_regexp_strict.match(definition)
+                mt_nonstrict = def_regexp_nonstrict.match(definition)
+                if mt_strict:
+                    prop = mt_strict.group("prop").strip()
+                    values_raw = mt_strict.group("values").split("|")
+                    if len(values_raw) > 1:
+                        values = [v.strip() for v in values_raw]
+                    else:
+                        values = values_raw[0].strip() or None
+                    default = mt_strict.group("default") or None
+                    if read_only and default is not None:
+                        log.info("Default value for read-only property: {0}".format(prop))
+                elif mt_nonstrict:
+                    prop = mt_nonstrict.group("prop").strip()
+                    values = mt_nonstrict.group("values").strip() or None
+                    default = None
+                else:
                     log.info("Unable to parse definition: {}".format(definition))
                     continue
-                prop = m.group("prop").strip()
-                values_raw = m.group("values").split("|")
-                if len(values_raw) > 1:
-                    values = [v.strip() for v in values_raw]
-                else:
-                    values = values_raw[0].strip() or None
-                default = m.group("default") or None
-                if read_only and default is not None:
-                    log.info("Default value for read-only property: {0}".format(prop))
                 description = cells[1].get_text().strip()
                 for command in current_commands:
                     result.append({
